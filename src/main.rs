@@ -49,7 +49,6 @@ struct DecklistLinks {
 
 #[derive(Debug)]
 struct Decklist {
-    id: Option<String>,
     event: Option<String>,
     player: Option<String>,
     format: Format,
@@ -88,7 +87,7 @@ fn find_latest_decklists(
             let document = Document::from(html_link.as_str());
             let link_container = document
                 .find(Class("article-item-extended"))
-                .nth(0)
+                .next()
                 .unwrap();
 
             let link = link_container
@@ -101,12 +100,12 @@ fn find_latest_decklists(
 
             let format = title_container
                 .find(Name("h3"))
-                .nth(0)
+                .next()
                 .unwrap()
                 .text()
                 .to_lowercase()
                 .split(" ")
-                .nth(0)
+                .next()
                 .unwrap()
                 .into();
 
@@ -126,6 +125,19 @@ fn scrape_decklists(
     let res = client.get(url).send()?.text()?;
 
     let document = Document::from(res.as_str());
+
+    let date_node = document
+        .find(Class("posted-in"))
+        .next()
+        .unwrap()
+        .children()
+        .nth(2);
+
+    let date = match date_node {
+        Some(node) => Some(node.text().trim().to_owned()),
+        None => None
+    };
+
     let decklist_containers = document.find(Class("deck-group"));
 
     let decklists = decklist_containers
@@ -146,12 +158,35 @@ fn scrape_decklists(
                 .map(|row| parse_card_row(&row))
                 .collect();
 
+            let player_and_record = container
+                .find(Class("deck-meta"))
+                .next()
+                .unwrap()
+                .find(Name("h4"))
+                .next();
+
+            let player = match player_and_record {
+                Some(node) => Some(node.text().trim().to_owned()),
+                None => None
+            };
+
+            let event_node = container
+                .find(Class("deck-meta"))
+                .next()
+                .unwrap()
+                .find(Name("h5"))
+                .next();
+
+            let event = match event_node {
+                Some(node) => Some(node.text().trim().to_owned()),
+                None => None
+            };
+
             Decklist {
-                id: None,
-                event: None,
-                player: None,
-                format: format,
-                date: None,
+                event,
+                player,
+                format,
+                date: date.clone(),
                 mainboard,
                 sideboard,
             }
