@@ -1,10 +1,11 @@
-use std::{thread, time};
+use chrono::prelude::*;
 use reqwest::blocking::Client;
 use reqwest::Url;
 use select::document::Document;
 use select::node::Node;
 use select::predicate::{Class, Name};
 use serde::Deserialize;
+use std::{thread, time};
 
 const BASE_URL: &str = "https://magic.wizards.com";
 const DECKLISTS_ENDPOINT: &str = "/en/section-articles-see-more-ajax?dateoff=&l=en&f=9041&search-result-theme=&limit=10&fromDate=&toDate=&sort=DESC&word=&offset=0";
@@ -52,7 +53,7 @@ struct Decklist {
     event: Option<String>,
     player: Option<String>,
     format: Format,
-    date: Option<String>,
+    date: Option<NaiveDate>,
     mainboard: Vec<(usize, String)>,
     sideboard: Vec<(usize, String)>,
 }
@@ -96,7 +97,7 @@ fn find_latest_decklists(
                 .map(|s| s.to_string())
                 .collect();
 
-            let title_container = document.find(Class("title")).nth(0).unwrap();
+            let title_container = document.find(Class("title")).next().unwrap();
 
             let format = title_container
                 .find(Name("h3"))
@@ -104,7 +105,7 @@ fn find_latest_decklists(
                 .unwrap()
                 .text()
                 .to_lowercase()
-                .split(" ")
+                .split(' ')
                 .next()
                 .unwrap()
                 .into();
@@ -126,17 +127,18 @@ fn scrape_decklists(
 
     let document = Document::from(res.as_str());
 
-    let date_node = document
+    let date = document
         .find(Class("posted-in"))
         .next()
         .unwrap()
         .children()
-        .nth(2);
-
-    let date = match date_node {
-        Some(node) => Some(node.text().trim().to_owned()),
-        None => None
-    };
+        .nth(2)
+        .and_then(|node| {
+            node.text()
+                .trim()
+                .strip_prefix("on ")
+                .and_then(|date_str| NaiveDate::parse_from_str(date_str, "%B %d, %Y").ok())
+        });
 
     let decklist_containers = document.find(Class("deck-group"));
 
@@ -158,35 +160,27 @@ fn scrape_decklists(
                 .map(|row| parse_card_row(&row))
                 .collect();
 
-            let player_and_record = container
+            let player = container
                 .find(Class("deck-meta"))
                 .next()
                 .unwrap()
                 .find(Name("h4"))
-                .next();
+                .next()
+                .map(|node| node.text().trim().to_owned());
 
-            let player = match player_and_record {
-                Some(node) => Some(node.text().trim().to_owned()),
-                None => None
-            };
-
-            let event_node = container
+            let event = container
                 .find(Class("deck-meta"))
                 .next()
                 .unwrap()
                 .find(Name("h5"))
-                .next();
-
-            let event = match event_node {
-                Some(node) => Some(node.text().trim().to_owned()),
-                None => None
-            };
+                .next()
+                .map(|node| node.text().trim().to_owned());
 
             Decklist {
                 event,
                 player,
                 format,
-                date: date.clone(),
+                date,
                 mainboard,
                 sideboard,
             }
@@ -198,7 +192,8 @@ fn scrape_decklists(
 
 fn parse_card_row(card_row: &Node) -> (usize, String) {
     let count_str: String = card_row.find(Class("card-count")).next().unwrap().text();
-    let count = usize::from_str_radix(&count_str, 10).unwrap();
+    let count = count_str.parse::<usize>().unwrap();
+
     let name: String = card_row
         .find(Class("card-name"))
         .next()
