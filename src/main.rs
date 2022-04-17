@@ -1,11 +1,13 @@
 use chrono::prelude::*;
 use reqwest::blocking::Client;
 use reqwest::Url;
+use rusqlite::{params, Connection, Result};
 use select::document::Document;
 use select::node::Node;
 use select::predicate::{Class, Name};
 use serde::Deserialize;
-use std::{thread, time};
+
+use std::{fmt, thread, time};
 
 const BASE_URL: &str = "https://magic.wizards.com";
 const DECKLISTS_ENDPOINT: &str = "/en/section-articles-see-more-ajax?dateoff=&l=en&f=9041&search-result-theme=&limit=10&fromDate=&toDate=&sort=DESC&word=&offset=0";
@@ -39,6 +41,32 @@ impl From<&str> for Format {
     }
 }
 
+impl fmt::Display for Format {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Format::Standard => write!(f, "standard"),
+            Format::Pioneer => write!(f, "pioneer"),
+            Format::Modern => write!(f, "modern"),
+            Format::Legacy => write!(f, "legacy"),
+            Format::Vintage => write!(f, "vintage"),
+            Format::Pauper => write!(f, "pauper"),
+            Format::Historic => write!(f, "historic"),
+            Format::Alchemy => write!(f, "alchemy"),
+            Format::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NotFoundError;
+
+impl fmt::Display for NotFoundError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "article is not found")
+    }
+}
+impl std::error::Error for NotFoundError {}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct DecklistLinks {
@@ -50,27 +78,106 @@ struct DecklistLinks {
 
 #[derive(Debug)]
 struct Decklist {
-    event: Option<String>,
-    player: Option<String>,
     format: Format,
+    player: Option<String>,
+    event: Option<String>,
     date: Option<NaiveDate>,
     mainboard: Vec<(usize, String)>,
     sideboard: Vec<(usize, String)>,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let client = Client::new();
+
+    let conn = Connection::open("decklists.db")?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS decks (
+                id INTEGER PRIMARY KEY,
+                format TEXT NOT NULL,
+                event TEXT,
+                date TEXT,
+                player TEXT
+            )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cards (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS deck_cards (
+                id INTEGER PRIMRY KEY,
+                deck_id INTEGER,
+                card_id INTEGER,
+                count INTEGER,
+                is_sideboard BOOLEAN,
+                FOREIGN KEY(deck_id) REFERENCES decks(id),
+                FOREIGN KEY(card_id) REFERENCES cards(id)
+            )",
+        [],
+    )?;
 
     let links = find_latest_decklists(&client).unwrap();
 
     for (format, link) in links {
-        let decklists = scrape_decklists(&client, &link, format);
+        if let Ok(decklists) = scrape_decklists(&client, &link, format) {
+            for decklist in decklists.into_iter() {
+                conn.execute(
+                    "INSERT INTO decks (format, event, date, player) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        decklist.format.to_string(),
+                        decklist.event,
+                        decklist.date.and_then(|d| Some(d.to_string())),
+                        decklist.player,
+                    ],
+                )?;
 
-        println!("Got decklists {:?}", decklists);
+                let deck_id = conn.last_insert_rowid();
+
+                for (count, card) in decklist.mainboard.into_iter() {
+                    conn.execute(
+                        "INSERT INTO cards (name) VALUES (?1)",
+                        params![card],
+                    )?;
+
+                    conn.execute(
+                        "INSERT INTO deck_cards (deck_id, card_id, count, is_sideboard) VALUES (?1, ?2, ?3, 0)",
+                        params![
+                            deck_id,
+                            conn.last_insert_rowid(),
+                            count
+                        ],
+                    )?;
+                }
+
+                for (count, card) in decklist.sideboard.into_iter() {
+                    let _res = conn.execute(
+                        "INSERT INTO cards (name) VALUES (?1)",
+                        params![card],
+                    );
+
+                    conn.execute(
+                        "INSERT INTO deck_cards (deck_id, card_id, count, is_sideboard) VALUES (?1, ?2, ?3, 1)",
+                        params![
+                            deck_id,
+                            conn.last_insert_rowid(),
+                            count
+                        ],
+                    )?;
+                }
+            }
+        }
 
         // Lets be polite
         thread::sleep(time::Duration::from_millis(10000));
     }
+
+    Ok(())
 }
 
 fn find_latest_decklists(
@@ -125,6 +232,10 @@ fn scrape_decklists(
     let url = Url::parse(BASE_URL)?.join(link)?;
     let res = client.get(url).send()?.text()?;
 
+    if res.contains("no result found") {
+        return Err(Box::new(NotFoundError));
+    }
+
     let document = Document::from(res.as_str());
 
     let date = document
@@ -149,7 +260,7 @@ fn scrape_decklists(
                 .next()
                 .unwrap()
                 .find(Class("row"))
-                .map(|row| parse_card_row(&row))
+                .flat_map(|row| parse_card_row(&row))
                 .collect();
 
             let sideboard = container
@@ -157,7 +268,7 @@ fn scrape_decklists(
                 .next()
                 .unwrap()
                 .find(Class("row"))
-                .map(|row| parse_card_row(&row))
+                .flat_map(|row| parse_card_row(&row))
                 .collect();
 
             let player = container
@@ -190,17 +301,17 @@ fn scrape_decklists(
     Ok(decklists)
 }
 
-fn parse_card_row(card_row: &Node) -> (usize, String) {
-    let count_str: String = card_row.find(Class("card-count")).next().unwrap().text();
-    let count = count_str.parse::<usize>().unwrap();
+fn parse_card_row(card_row: &Node) -> Option<(usize, String)> {
+    let count_str: String = card_row.find(Class("card-count")).next()?.text();
+    let count = count_str.parse::<usize>().ok()?;
 
-    let name: String = card_row
+    card_row
         .find(Class("card-name"))
         .next()
-        .unwrap()
-        .find(Name("a"))
-        .next()
-        .unwrap()
-        .text();
-    (count, name)
+        .and_then(|node| {
+            node.find(Name("a"))
+                .next()
+                .or_else(|| node.children().next())
+        })
+        .map(|node| (count, node.text()))
 }
