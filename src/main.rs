@@ -1,7 +1,7 @@
 use chrono::prelude::*;
 use reqwest::blocking::Client;
 use reqwest::Url;
-use rusqlite::{params, Connection, Result};
+use rusqlite::{params, named_params, Connection, Result};
 use select::document::Document;
 use select::node::Node;
 use select::predicate::{Class, Name};
@@ -111,7 +111,6 @@ fn main() -> Result<()> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS deck_cards (
-                id INTEGER PRIMRY KEY,
                 deck_id INTEGER,
                 card_id INTEGER,
                 count INTEGER,
@@ -138,34 +137,47 @@ fn main() -> Result<()> {
                 )?;
 
                 let deck_id = conn.last_insert_rowid();
+                let mut cards_query = conn.prepare("SELECT id FROM cards WHERE name = :name;")?;
 
-                for (count, card) in decklist.mainboard.into_iter() {
-                    conn.execute(
-                        "INSERT INTO cards (name) VALUES (?1)",
-                        params![card],
-                    )?;
+                for (count, card) in decklist.mainboard.into_iter() {                    
+                    let card_id = 
+                        if let Some(row) = cards_query.query(named_params!{ ":name": card })?.next()? {
+                            row.get(0)?
+                        } else {
+                            conn.execute(
+                                "INSERT INTO cards (name) VALUES (?1)",
+                                params![card],
+                            )?;
+                            conn.last_insert_rowid()
+                        };
 
                     conn.execute(
                         "INSERT INTO deck_cards (deck_id, card_id, count, is_sideboard) VALUES (?1, ?2, ?3, 0)",
                         params![
                             deck_id,
-                            conn.last_insert_rowid(),
+                            card_id,
                             count
                         ],
                     )?;
                 }
 
                 for (count, card) in decklist.sideboard.into_iter() {
-                    let _res = conn.execute(
-                        "INSERT INTO cards (name) VALUES (?1)",
-                        params![card],
-                    );
+                    let card_id = 
+                        if let Some(row) = cards_query.query(named_params!{ ":name": card })?.next()? {
+                            row.get(0)?
+                        } else {
+                            conn.execute(
+                                "INSERT INTO cards (name) VALUES (?1)",
+                                params![card],
+                            )?;
+                            conn.last_insert_rowid()
+                        };
 
                     conn.execute(
                         "INSERT INTO deck_cards (deck_id, card_id, count, is_sideboard) VALUES (?1, ?2, ?3, 1)",
                         params![
                             deck_id,
-                            conn.last_insert_rowid(),
+                            card_id,
                             count
                         ],
                     )?;
@@ -174,7 +186,7 @@ fn main() -> Result<()> {
         }
 
         // Lets be polite
-        thread::sleep(time::Duration::from_millis(10000));
+        thread::sleep(time::Duration::from_millis(1000));
     }
 
     Ok(())
