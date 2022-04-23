@@ -1,7 +1,7 @@
-use rusqlite::{Connection, Result};
+use chrono::prelude::*;
+use serde::Deserialize;
 
 use std::fmt;
-use deck_list_scraper::{mtgo, db};
 
 #[derive(Eq, PartialEq, Copy, Clone, Debug)]
 pub enum Format {
@@ -48,11 +48,21 @@ impl fmt::Display for Format {
     }
 }
 
-fn main() -> Result<()> {
-    let conn = Connection::open("decklists.db")?;
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DecklistLinks {
+    pub data: Vec<String>,
+    _status: i32,
+    _offset: i32,
+    _display_see_more: i32,
+}
 
-    db::setup(&conn)?;
-    mtgo::scrape(&conn)?;
-
-    Ok(())
+#[derive(Debug)]
+pub struct Decklist {
+    pub format: Format,
+    pub player: Option<String>,
+    pub event: Option<String>,
+    pub date: Option<NaiveDate>,
+    pub mainboard: Vec<(usize, String)>,
+    pub sideboard: Vec<(usize, String)>,
 }
