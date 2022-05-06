@@ -15,6 +15,7 @@ pub enum Format {
     Alchemy,
     Explorer,
     Premodern,
+    OldSchool,
     Unknown,
 }
 
@@ -30,6 +31,7 @@ impl From<&str> for Format {
             "historic" => Format::Historic,
             "alchemy" => Format::Alchemy,
             "explorer" => Format::Explorer,
+            "oldschool" => Format::OldSchool,
             "premodern" => Format::Premodern,
             _ => Format::Unknown,
         }
@@ -49,6 +51,7 @@ impl fmt::Display for Format {
             Format::Alchemy => write!(f, "alchemy"),
             Format::Explorer => write!(f, "explorer"),
             Format::Premodern => write!(f, "premodern"),
+            Format::OldSchool => write!(f, "oldschool"),
             Format::Unknown => write!(f, "unknown"),
         }
     }
