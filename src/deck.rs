@@ -13,6 +13,8 @@ pub enum Format {
     Pauper,
     Historic,
     Alchemy,
+    Explorer,
+    Premodern,
     Unknown,
 }
 
@@ -27,6 +29,8 @@ impl From<&str> for Format {
             "pauper" => Format::Pauper,
             "historic" => Format::Historic,
             "alchemy" => Format::Alchemy,
+            "explorer" => Format::Explorer,
+            "premodern" => Format::Premodern,
             _ => Format::Unknown,
         }
     }
@@ -43,6 +47,8 @@ impl fmt::Display for Format {
             Format::Pauper => write!(f, "pauper"),
             Format::Historic => write!(f, "historic"),
             Format::Alchemy => write!(f, "alchemy"),
+            Format::Explorer => write!(f, "explorer"),
+            Format::Premodern => write!(f, "premodern"),
             Format::Unknown => write!(f, "unknown"),
         }
     }
@@ -65,4 +71,13 @@ pub struct Decklist {
     pub date: Option<NaiveDate>,
     pub mainboard: Vec<(usize, String)>,
     pub sideboard: Vec<(usize, String)>,
+}
+
+#[derive(Debug)]
+pub struct ScrapedLink {
+    pub id: i32,
+    pub link: String,
+    pub is_success: bool,
+    pub error_msg: Option<String>,
+    pub created_at: String,
 }
