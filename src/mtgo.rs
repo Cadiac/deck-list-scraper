@@ -13,6 +13,7 @@ use crate::db;
 
 const BASE_URL: &str = "https://magic.wizards.com";
 const DECKLISTS_ENDPOINT: &str = "/en/section-articles-see-more-ajax?dateoff=&l=en&f=9041&search-result-theme=&fromDate=&toDate=&sort=DESC&word=";
+const SLEEP_DELAY: u64 = 1000;
 
 #[derive(Debug, Clone)]
 struct NotFoundError;
@@ -64,7 +65,7 @@ pub fn scrape(conn: &Connection) -> Result<()> {
         }
 
         // Lets be polite
-        thread::sleep(time::Duration::from_millis(1000));
+        thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
     }
 
     Ok(())
@@ -185,6 +186,9 @@ fn scrape_decklists(
                 date,
                 mainboard,
                 sideboard,
+                archetype: None,
+                result: Some("5-0".to_owned()),
+                name: None,
             }
         })
         .collect();

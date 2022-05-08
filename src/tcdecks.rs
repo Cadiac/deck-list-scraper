@@ -3,7 +3,7 @@ use reqwest::blocking::Client;
 use reqwest::Url;
 use rusqlite::{Connection, Result};
 use select::document::Document;
-use select::node::Node;
+use select::node::Children;
 use select::predicate::{Class, Name};
 use std::time::Duration;
 use std::{fmt, thread, time};
@@ -14,13 +14,14 @@ use crate::deck::{Decklist, Format};
 const BASE_URL: &str = "https://www.tcdecks.net";
 const DECKLISTS_ENDPOINT: &str = "/format.php";
 const FORMATS: &[(&str, Format)] = &[
+    ("Premodern", Format::Premodern),
     ("Vintage", Format::Vintage),
     ("Vintage Old School", Format::OldSchool),
-    ("Premodern", Format::Premodern),
     ("Legacy", Format::Legacy),
     ("Modern", Format::Modern),
     ("Pauper", Format::Pauper),
 ];
+const SLEEP_DELAY: u64 = 1000;
 
 #[derive(Debug, Clone)]
 struct NotFoundError;
@@ -40,7 +41,6 @@ pub fn scrape(conn: &Connection) -> Result<()> {
 
     let links: Vec<(Format, String)> = FORMATS
         .iter()
-        .take(1) // TODO
         .flat_map(|format| match find_latest_decklists(&client, format) {
             Ok(links) => links,
             Err(e) => {
@@ -71,22 +71,22 @@ pub fn scrape(conn: &Connection) -> Result<()> {
 
         match scrape_decklists(&client, &link, format) {
             Ok(decklists) => {
-                // for decklist in decklists.into_iter() {
-                //     if let Err(e) = db::insert_decklist(conn, &decklist) {
-                //         eprintln!("Failed to insert decklist: {}", e);
-                //     }
-                // }
+                for decklist in decklists.into_iter() {
+                    if let Err(e) = db::insert_decklist(conn, &decklist) {
+                        eprintln!("Failed to insert decklist: {}", e);
+                    }
+                }
 
-                // db::insert_scraped_link(conn, &link, true, None)?;
+                db::insert_scraped_link(conn, &link, true, None)?;
             }
             Err(e) => {
                 eprintln!("Failed to scrape decklists: {}", e);
-                // db::insert_scraped_link(conn, &link, false, Some(&e.to_string()))?;
+                db::insert_scraped_link(conn, &link, false, Some(&e.to_string()))?;
             }
         }
 
         // Lets be polite
-        thread::sleep(time::Duration::from_millis(1000));
+        thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
     }
 
     Ok(())
@@ -103,7 +103,10 @@ fn find_latest_decklists(
         let url = Url::parse(BASE_URL)?
             .join(format!("{DECKLISTS_ENDPOINT}?format={format_param}&page={page}").as_str())?;
 
-        println!("[{format_param}/{page}] Scanning event links, total {}", links.len());
+        println!(
+            "[{format_param}/{page}] Scanning event links, total {}",
+            links.len()
+        );
 
         let res_html = client.get(url).send()?.text()?;
         let page_links = parse_tourney_links(res_html, *format);
@@ -115,7 +118,7 @@ fn find_latest_decklists(
         links.extend(page_links);
         page += 1;
 
-        thread::sleep(time::Duration::from_millis(1000));
+        thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
     }
 }
 
@@ -149,112 +152,122 @@ fn scrape_decklists(
 
     let deck_links = parse_tourney_links(res_html, *format);
 
-    println!("Found {} deck links", deck_links.len());
+    let mut decklists = Vec::new();
 
     for (index, (format, deck_link)) in deck_links.iter().enumerate() {
-        println!("[Event {event_link}: {}/{}] {}: {}", index + 1, deck_links.len(), format, deck_link);
+        println!(
+            "[Event {event_link}, deck: {}/{}] {}: {}",
+            index + 1,
+            deck_links.len(),
+            format,
+            deck_link
+        );
 
         let deck_url = Url::parse(BASE_URL)?.join(deck_link)?;
         let res_html = client.get(deck_url).send()?.text()?;
 
         let document = Document::from(res_html.as_str());
 
+        let mut legend = document.find(Name("legend")).next().unwrap().children();
+
+        // Skip the empty whitespaces
+        let event = legend.nth(1).map(|node| node.text());
+        let date = legend.nth(1).and_then(|node| {
+            let date_text = node.text();
+            date_text.trim().split(" | ").nth(2).and_then(|date_str| {
+                NaiveDate::parse_from_str(date_str.strip_prefix("Date: ").unwrap_or(""), "%d/%m/%Y")
+                    .ok()
+            })
+        });
+
         let table = document.find(Name("table")).next().unwrap();
         let mut rows = table.find(Name("tr"));
 
-        let name = rows.next().unwrap().find(Name("th")).next().unwrap();
+        let mut header_row = rows.next().ok_or("no table rows")?.find(Name("th"));
 
-        println!("Player name: {}", name.text());
+        let name_header = header_row
+            .next()
+            .map(|node| node.text())
+            .ok_or("no name header")?;
 
-        thread::sleep(time::Duration::from_millis(1000));
+        let mut name_and_archetype = name_header.split(" playing ");
+        let player_name = name_and_archetype.next().ok_or("no name")?.trim();
+        let archetype = name_and_archetype.next().ok_or("no archetype")?.trim();
+
+        let position_th = header_row
+            .next()
+            .map(|node| node.text())
+            .ok_or("no position header")?;
+
+        let position = position_th
+            .trim()
+            .strip_prefix("Position: ")
+            .ok_or("no position")?;
+
+        let deck_name_header = rows
+            .next()
+            .ok_or("no table rows")?
+            .find(Name("th"))
+            .next()
+            .map(|node| node.text())
+            .ok_or("no deck name header")?;
+
+        let deck_name = deck_name_header
+            .trim()
+            .strip_prefix("Deck Name: ")
+            .ok_or("no deck name")?;
+
+        let mut cards_row = rows.next().ok_or("no table rows")?.find(Name("td"));
+
+        let mut mainboard = parse_cards(cards_row
+            .next()
+            .ok_or("no cards")?
+            .children());
+
+        let mut mainboard_2 = parse_cards(cards_row
+            .next()
+            .ok_or("no cards")?
+            .children());
+
+        mainboard.append(&mut mainboard_2);
+
+        let sideboard = parse_cards(cards_row
+            .next()
+            .ok_or("no cards")?
+            .children());
+
+        let decklist = Decklist {
+            event,
+            player: Some(player_name.to_owned()),
+            format: *format,
+            date,
+            mainboard,
+            sideboard,
+            archetype: Some(archetype.to_owned()),
+            result: Some(position.to_owned()),
+            name: Some(deck_name.to_owned()),
+        };
+
+        decklists.push(decklist);
+
+        thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
     }
 
-    // let decklist = parse_decklist(client, link)?;
-
-    // if let Err(e) = db::insert_decklist(&decklist) {
-    //     eprintln!("Failed to insert decklist: {}", e);
-    // }
-
-    // let document = Document::from(res.as_str());
-
-    // let date = document
-    //     .find(Class("posted-in"))
-    //     .next()
-    //     .unwrap()
-    //     .children()
-    //     .nth(2)
-    //     .and_then(|node| {
-    //         node.text()
-    //             .trim()
-    //             .strip_prefix("on ")
-    //             .and_then(|date_str| NaiveDate::parse_from_str(date_str, "%B %d, %Y").ok())
-    //     });
-
-    // let decklist_containers = document.find(Class("deck-group"));
-
-    // let decklists = decklist_containers
-    //     .map(|container| {
-    //         let mainboard = container
-    //             .find(Class("sorted-by-overview-container"))
-    //             .next()
-    //             .unwrap()
-    //             .find(Class("row"))
-    //             .flat_map(|row| parse_card_row(&row))
-    //             .collect();
-
-    //         let sideboard = container
-    //             .find(Class("sorted-by-sideboard-container"))
-    //             .next()
-    //             .map_or_else(
-    //                 || Vec::new(),
-    //                 |node| {
-    //                     node.find(Class("row"))
-    //                         .flat_map(|row| parse_card_row(&row))
-    //                         .collect()
-    //                 },
-    //             );
-
-    //         let player = container
-    //             .find(Class("deck-meta"))
-    //             .next()
-    //             .unwrap()
-    //             .find(Name("h4"))
-    //             .next()
-    //             .map(|node| node.text().trim().to_owned());
-
-    //         let event = container
-    //             .find(Class("deck-meta"))
-    //             .next()
-    //             .unwrap()
-    //             .find(Name("h5"))
-    //             .next()
-    //             .map(|node| node.text().trim().to_owned());
-
-    //         Decklist {
-    //             event,
-    //             player,
-    //             format: *format,
-    //             date,
-    //             mainboard,
-    //             sideboard,
-    //         }
-    //     })
-    //     .collect();
-
-    Ok(vec![])
+    Ok(decklists)
 }
 
-fn parse_card_row(card_row: &Node) -> Option<(usize, String)> {
-    let count_str: String = card_row.find(Class("card-count")).next()?.text();
-    let count = count_str.parse::<usize>().ok()?;
+fn parse_cards(card_rows: Children) -> Vec<(usize, String)> {
+    let mut amount = 1;
 
-    card_row
-        .find(Class("card-name"))
-        .next()
-        .and_then(|node| {
-            node.find(Name("a"))
-                .next()
-                .or_else(|| node.children().next())
+    card_rows
+        .flat_map(|node| match node.name() {
+            Some("h6") => None,
+            Some("a") => Some((amount, node.text())),
+            _ => {
+                let text = node.text();
+                amount = text.trim().parse::<usize>().unwrap_or(1);
+                None
+            }
         })
-        .map(|node| (count, node.text()))
+        .collect::<Vec<_>>()
 }

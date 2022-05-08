@@ -7,10 +7,13 @@ pub fn setup(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS decks (
                 id INTEGER PRIMARY KEY,
+                name TEXT,
                 format TEXT NOT NULL,
                 event TEXT,
                 date TEXT,
                 player TEXT,
+                archetype TEXT,
+                result TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )",
         [],
@@ -52,12 +55,15 @@ pub fn setup(conn: &Connection) -> Result<()> {
 
 pub fn insert_decklist(conn: &Connection, decklist: &Decklist) -> Result<()> {
     conn.execute(
-        "INSERT INTO decks (format, event, date, player) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO decks (format, event, date, player, archetype, score, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             decklist.format.to_string(),
             decklist.event,
             decklist.date.and_then(|d| Some(d.to_string())),
             decklist.player,
+            decklist.archetype,
+            decklist.result,
+            decklist.name,
         ],
     )?;
 

@@ -74,6 +74,9 @@ pub struct Decklist {
     pub date: Option<NaiveDate>,
     pub mainboard: Vec<(usize, String)>,
     pub sideboard: Vec<(usize, String)>,
+    pub archetype: Option<String>,
+    pub result: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug)]
