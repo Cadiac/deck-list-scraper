@@ -6,7 +6,7 @@ fn main() -> Result<()> {
 
     db::setup(&conn)?;
     tcdecks::scrape(&conn)?;
-    // mtgo::scrape(&conn)?;
+    mtgo::scrape(&conn)?;
 
     Ok(())
 }

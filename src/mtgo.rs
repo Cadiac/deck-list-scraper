@@ -73,7 +73,7 @@ pub fn scrape(conn: &Connection) -> Result<()> {
 
 fn find_latest_decklists(client: &Client) -> Result<Vec<(Format, String)>, Box<dyn std::error::Error>> {
     let offset = 0;
-    let limit = 20;
+    let limit = 100;
     let url = Url::parse(BASE_URL)?.join(format!("{DECKLISTS_ENDPOINT}&offset={offset}&limit={limit}").as_str())?;
     let res = client.get(url).send()?.text()?;
 

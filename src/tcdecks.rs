@@ -15,13 +15,13 @@ const BASE_URL: &str = "https://www.tcdecks.net";
 const DECKLISTS_ENDPOINT: &str = "/format.php";
 const FORMATS: &[(&str, Format)] = &[
     ("Premodern", Format::Premodern),
-    ("Vintage", Format::Vintage),
-    ("Vintage Old School", Format::OldSchool),
     ("Legacy", Format::Legacy),
     ("Modern", Format::Modern),
+    ("Vintage", Format::Vintage),
+    ("Vintage Old School", Format::OldSchool),
     ("Pauper", Format::Pauper),
 ];
-const SLEEP_DELAY: u64 = 1000;
+const SLEEP_DELAY: u64 = 5000;
 
 #[derive(Debug, Clone)]
 struct NotFoundError;
@@ -39,54 +39,50 @@ pub fn scrape(conn: &Connection) -> Result<()> {
         .build()
         .unwrap();
 
-    let links: Vec<(Format, String)> = FORMATS
-        .iter()
-        .flat_map(|format| match find_latest_decklists(&client, format) {
+    for current_format in FORMATS.iter() {
+        let links: Vec<(Format, String)> = match find_latest_decklists(&client, current_format) {
             Ok(links) => links,
             Err(e) => {
-                eprintln!("Failed to find decklists for {}: {}", format.0, e);
+                eprintln!("Failed to find decklists for {}: {}", current_format.0, e);
                 vec![]
             }
-        })
-        .collect();
+        };
 
-    println!("Found {} links", links.len());
+        println!("Found {} links for {}.", links.len(), current_format.0);
 
-    for (index, (format, link)) in links.iter().enumerate() {
-        println!("[{}/{}] {}: {}", index + 1, links.len(), format, link);
+        for (index, (format, link)) in links.iter().enumerate() {
+            println!("[{}/{}] {}: {}", index + 1, links.len(), format, link);
 
-        match db::find_scraped_link(conn, link)? {
-            Some(scraped) => {
-                if scraped.is_success {
-                    println!(
-                        "[{}/{}] Already successfully scraped, skipping",
-                        index + 1,
-                        links.len()
-                    );
-                    continue;
-                }
-            }
-            None => {}
-        }
-
-        match scrape_decklists(&client, &link, format) {
-            Ok(decklists) => {
-                for decklist in decklists.into_iter() {
-                    if let Err(e) = db::insert_decklist(conn, &decklist) {
-                        eprintln!("Failed to insert decklist: {}", e);
+            match db::find_scraped_link(conn, link)? {
+                Some(scraped) => {
+                    if scraped.is_success {
+                        println!(
+                            "[{}/{}] Already successfully scraped, skipping",
+                            index + 1,
+                            links.len()
+                        );
+                        continue;
                     }
                 }
-
-                db::insert_scraped_link(conn, &link, true, None)?;
+                None => {}
             }
-            Err(e) => {
-                eprintln!("Failed to scrape decklists: {}", e);
-                db::insert_scraped_link(conn, &link, false, Some(&e.to_string()))?;
+
+            match scrape_decklists(&client, &link, format) {
+                Ok(decklists) => {
+                    for decklist in decklists.into_iter() {
+                        if let Err(e) = db::insert_decklist(conn, &decklist) {
+                            eprintln!("Failed to insert decklist: {}", e);
+                        }
+                    }
+
+                    db::insert_scraped_link(conn, &link, true, None)?;
+                }
+                Err(e) => {
+                    eprintln!("Failed to scrape decklists: {}", e);
+                    db::insert_scraped_link(conn, &link, false, Some(&e.to_string()))?;
+                }
             }
         }
-
-        // Lets be polite
-        thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
     }
 
     Ok(())
@@ -111,7 +107,7 @@ fn find_latest_decklists(
         let res_html = client.get(url).send()?.text()?;
         let page_links = parse_tourney_links(res_html, *format);
 
-        if page_links.is_empty() || page > 1 {
+        if page_links.is_empty() || page > 100 {
             return Ok(links);
         }
 
@@ -147,6 +143,9 @@ fn scrape_decklists(
     event_link: &str,
     format: &Format,
 ) -> Result<Vec<Decklist>, Box<dyn std::error::Error>> {
+    // Lets be polite
+    thread::sleep(time::Duration::from_millis(SLEEP_DELAY));
+
     let url = Url::parse(BASE_URL)?.join(event_link)?;
     let res_html = client.get(url).send()?.text()?;
 
@@ -215,26 +214,17 @@ fn scrape_decklists(
         let deck_name = deck_name_header
             .trim()
             .strip_prefix("Deck Name: ")
-            .ok_or("no deck name")?;
+            .and_then(|s| Some(s.to_owned()));
 
         let mut cards_row = rows.next().ok_or("no table rows")?.find(Name("td"));
 
-        let mut mainboard = parse_cards(cards_row
-            .next()
-            .ok_or("no cards")?
-            .children());
+        let mut mainboard = parse_cards(cards_row.next().ok_or("no cards")?.children());
 
-        let mut mainboard_2 = parse_cards(cards_row
-            .next()
-            .ok_or("no cards")?
-            .children());
+        let mut mainboard_2 = parse_cards(cards_row.next().ok_or("no cards")?.children());
 
         mainboard.append(&mut mainboard_2);
 
-        let sideboard = parse_cards(cards_row
-            .next()
-            .ok_or("no cards")?
-            .children());
+        let sideboard = parse_cards(cards_row.next().ok_or("no cards")?.children());
 
         let decklist = Decklist {
             event,
@@ -245,7 +235,7 @@ fn scrape_decklists(
             sideboard,
             archetype: Some(archetype.to_owned()),
             result: Some(position.to_owned()),
-            name: Some(deck_name.to_owned()),
+            name: deck_name,
         };
 
         decklists.push(decklist);
@@ -262,7 +252,10 @@ fn parse_cards(card_rows: Children) -> Vec<(usize, String)> {
     card_rows
         .flat_map(|node| match node.name() {
             Some("h6") => None,
-            Some("a") => Some((amount, node.text())),
+            Some("a") => {
+                let card_name = node.text();
+                Some((amount, card_name.trim().to_owned()))
+            }
             _ => {
                 let text = node.text();
                 amount = text.trim().parse::<usize>().unwrap_or(1);

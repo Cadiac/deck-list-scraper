@@ -55,7 +55,7 @@ pub fn setup(conn: &Connection) -> Result<()> {
 
 pub fn insert_decklist(conn: &Connection, decklist: &Decklist) -> Result<()> {
     conn.execute(
-        "INSERT INTO decks (format, event, date, player, archetype, score, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO decks (format, event, date, player, archetype, result, name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             decklist.format.to_string(),
             decklist.event,
